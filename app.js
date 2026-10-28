@@ -1,5 +1,5 @@
-import { buildSession, finalConsonant, freshState, grade, localDateKey, maskSentence, uniqueChoices, validateProgress } from './srs.js';
-import { finishListening, isListening, matchResult, normalize, recognitionSupported, startListening, stopListening, stressKK, tipsForKK } from './pronounce.js';
+import { buildSession, finalConsonant, freshState, grade, localDateKey, maskSentence, uniqueChoices, validateProgress } from './srs.js?v=20261028204959';
+import { finishListening, isListening, matchResult, normalize, recognitionSupported, startListening, stopListening, stressKK, tipsForKK } from './pronounce.js?v=20261028204959';
 
 const app = document.querySelector('#app');
 const STORAGE_KEY = 'et_progress_v1';
@@ -138,16 +138,17 @@ function renderHome() {
   const modes = [['mixed', '混合（推薦）'], ['card', '字卡'], ['listen', '聽音選意思'], ['speak', `看中文說英文${recognitionSupported(window) ? '' : '（此瀏覽器不支援）'}`], ['spell', '聽音拼字']];
   if (!recognitionSupported(window) && prefs.mode === 'speak') prefs.mode = 'mixed';
   const eligible = words.filter((word) => (prefs.category === 'all' || word.category.includes(prefs.category)) && !progress[word.word]?.learnedOn).length;
-  const noPractice = dueCount() === 0 && (eligible === 0 || Math.max(0, Math.min(20, prefs.dailyLimit) - countTodayNew()) === 0);
+  // Ask the session builder itself, so the home screen never offers a start button that would do nothing.
+  const noPractice = !buildSession(words, progress, { category: prefs.category, newLimit: prefs.dailyLimit, now: Date.now(), mode: prefs.mode }).total;
   const todayMisses = words.filter((word) => progress[word.word]?.lapsedOn === localDateKey() && (prefs.category === 'all' || word.category.includes(prefs.category))).length;
   app.innerHTML = `<section><p class="eyebrow">美國日常與旅行</p><h1 class="page-title">英文單字練習</h1><p class="intro">用短短幾分鐘，把常用單字記起來。</p>
-    ${noPractice ? `<div class="panel empty-state"><h2>目前沒有可練習的字</h2><div class="button-row">${eligible ? `<button class="btn btn-primary" type="button" data-action="extra-new">加練 ${prefs.dailyLimit} 個新字</button>` : ''}${todayMisses ? `<button class="btn btn-soft" type="button" data-action="retry-today">複習今天答錯的字</button>` : ''}</div></div>` : ''}
     ${!recognitionSupported(window) ? '<p class="feedback">此瀏覽器不支援語音辨識。請使用 Safari 並在「設定 &gt; Siri」開啟聽寫。</p>' : ''}
     ${!('speechSynthesis' in window) ? '<p class="feedback">此瀏覽器不支援語音播放，練習中的播放鍵已停用。</p>' : ''}
     <div class="panel"><h2 class="section-heading">選擇單字分類</h2><div class="segmented" role="group" aria-label="單字分類">${cats.map(([value, label]) => `<button type="button" data-category="${value}" aria-pressed="${prefs.category === value}">${label}</button>`).join('')}</div></div>
     <div class="stats"><div class="stat-card"><span class="stat-value">${dueCount()}</span><span class="stat-label">待複習字</span></div><div class="stat-card"><span class="stat-value">${countTodayNew()}／${prefs.dailyLimit}</span><span class="stat-label">今日新字（已學／上限）</span></div><div class="stat-card"><span class="stat-value">${learnedCount()}<span class="muted">／${words.length}</span></span><span class="stat-label">已學單字</span></div></div>
     <div class="panel"><h2 class="section-heading">選擇練習方式</h2><div class="mode-grid">${modes.map(([value, label]) => `<label class="mode-option"><input type="radio" name="mode" value="${value}" ${prefs.mode === value ? 'checked' : ''} ${value === 'speak' && !recognitionSupported(window) ? 'disabled' : ''}><span>${label}</span></label>`).join('')}</div></div>
-    <button class="btn btn-primary" type="button" data-action="start">開始練習</button>
+    ${noPractice ? `<div class="panel empty-state"><h2>今天的新字和複習都完成了</h2><p>${eligible ? '想多練，可以再加一批新字。' : '這個分類的字都學過了，到期的字會自動出現在複習。'}</p><div class="button-row">${eligible ? `<button class="btn btn-primary" type="button" data-action="extra-new">加練 ${prefs.dailyLimit} 個新字</button>` : ''}${todayMisses ? `<button class="btn btn-soft" type="button" data-action="retry-today">複習今天答錯的字</button>` : ''}</div></div>`
+      : '<button class="btn btn-primary" type="button" data-action="start">開始練習</button>'}
     <div class="button-row"><button class="btn btn-soft" type="button" data-action="settings">${icons.gear.replace('<svg', '<svg aria-hidden="true"')}　設定</button><button class="btn btn-soft" type="button" data-action="sources">來源與授權</button></div>
     ${notice ? `<p class="feedback">${escapeHTML(notice)}</p>` : ''}</section>`;
 }
@@ -258,7 +259,7 @@ function beginSession() {
   currentMode = prefs.mode;
   session = buildSession(words, progress, { category: prefs.category, newLimit: prefs.dailyLimit, now: Date.now(), extraNew: forceExtraNew, retryToday: forceRetryToday, mode: currentMode });
   forceExtraNew = false; forceRetryToday = false;
-  if (!session.total) { renderHome(); return; }
+  if (!session.total) { renderHome(); app.querySelector('.empty-state')?.scrollIntoView({ block: 'center' }); return; }
   rightCount = 0; answeredCount = 0; missed = new Set(); newSeen = new Set(); sentencesUsed = new Map();
   nextQuestion();
 }
@@ -400,7 +401,7 @@ app.addEventListener('click', (event) => {
 });
 
 try {
-  const response = await fetch('words.json');
+  const response = await fetch('words.json?v=20261028204959');
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   words = await response.json();
   sharedAudio = new Audio();

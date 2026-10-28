@@ -28,24 +28,25 @@ test('easy applies the easy multiplier and ease increase', () => {
   assert.equal(next.ease, 2.65);
 });
 
-test('buildSession sorts due reviews, honors daily new limit and schedules missed words again', () => {
+test('buildSession includes due reviews, honors daily new limit and schedules missed words again', () => {
   const words = ['a', 'b', 'c', 'd', 'e', 'f'].map((word) => ({ word, tier: 1, category: ['daily'] }));
   const progress = {
     a: { reps: 1, interval: 2, ease: 2.5, due: 30, lapses: 0, learnedOn: '2026-01-01' },
     b: { reps: 1, interval: 2, ease: 2.5, due: 10, lapses: 0, learnedOn: '2026-01-01' },
   };
   const session = buildSession(words, progress, { category: 'daily', newLimit: 5, now: 100, rng: () => 0, todayNew: 1 });
-  assert.deepEqual(session.queue.slice(0, 2).map((q) => q.word.word), ['b', 'a']);
+  assert.deepEqual(session.reviews.map((w) => w.word).sort(), ['a', 'b']);
   assert.equal(session.newWords.length, 4);
-  assert.equal(session.next().word.word, 'b');
-  assert.equal(session.next().word.word, 'a');
-  const miss = session.next();
-  assert.equal(miss.word.word, 'c');
-  assert.equal(session.mark(miss, 'again'), true);
-  assert.equal(session.next().word.word, 'd');
-  assert.equal(session.next().word.word, 'e');
-  assert.equal(session.next().word.word, 'f');
-  assert.equal(session.next().word.word, 'c');
+  // Order is shuffled; check membership and that a missed word comes back after the queue.
+  const seen = [];
+  let missedWord = null;
+  for (let entry = session.next(); entry; entry = session.next()) {
+    seen.push(entry.word.word);
+    if (seen.length === 3 && !missedWord) { missedWord = entry.word.word; assert.equal(session.mark(entry, 'again'), true); }
+  }
+  assert.deepEqual([...new Set(seen.slice(0, 6))].sort(), ['a', 'b', 'c', 'd', 'e', 'f']);
+  assert.equal(seen.length, 7);
+  assert.equal(seen[6], missedWord);
 });
 
 test('again-due learned words review while ungraded new words do not count as learned', () => {
@@ -104,4 +105,23 @@ test('all 732 source sentences are masked at the form word boundary', async () =
     assert.ok(masked, `could not mask ${sentence.form}: ${sentence.en}`);
     assert.equal(maskSentence(masked, sentence.form), null, `form remains: ${sentence.form}: ${masked}`);
   }
+});
+
+test('session order is shuffled, not replayed in due order', async () => {
+  const { buildSession } = await import('../srs.js');
+  const now = Date.UTC(2026, 9, 28, 12);
+  const words = Array.from({ length: 12 }, (_, i) => ({ word: `w${i}`, tier: 1, category: ['daily'] }));
+  const progress = {};
+  // w0..w9 learned yesterday in order, so their due times are strictly increasing.
+  words.slice(0, 10).forEach((w, i) => { progress[w.word] = { reps: 1, interval: 1, ease: 2.5, due: now - 100000 + i, lapses: 0, lastSentence: -1, learnedOn: '2026-10-27' }; });
+  let seed = 7;
+  const rng = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; };
+  const order = (s) => { const out = []; let e; while ((e = s.next())) out.push(e.word.word); return out; };
+  const first = order(buildSession(words, progress, { now, newLimit: 2, todayNew: 0, rng }));
+  const dueOrder = words.slice(0, 10).map((w) => w.word);
+  assert.equal(first.length, 12);
+  assert.deepEqual([...first].sort(), [...dueOrder, 'w10', 'w11'].sort());
+  assert.notDeepEqual(first.filter((w) => dueOrder.includes(w)), dueOrder);
+  const second = order(buildSession(words, progress, { now, newLimit: 2, todayNew: 0, rng }));
+  assert.notDeepEqual(first, second);
 });

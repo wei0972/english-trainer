@@ -90,6 +90,12 @@ export function buildSession(words, progress = {}, options = {}) {
       }
     }
   }
+  // Due order only decides WHICH reviews make the cap; presenting in that order replays the order the
+  // words were learned, so every session would start the same way. Shuffle reviews and new words together.
+  for (let i = queue.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.max(0, Math.min(.999999, rng())) * (i + 1));
+    [queue[i], queue[j]] = [queue[j], queue[i]];
+  }
   const retries = [];
   let cursor = 0;
   let consumed = 0;

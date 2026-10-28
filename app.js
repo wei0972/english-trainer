@@ -62,12 +62,22 @@ function initAudioUnlock() {
   document.removeEventListener('pointerdown', initAudioUnlock);
   sharedAudio.src = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
   sharedAudio.muted = true;
-  sharedAudio.play().then(() => { sharedAudio.pause(); sharedAudio.currentTime = 0; sharedAudio.muted = false; sharedAudio.removeAttribute('src'); }).catch(() => { sharedAudio.muted = false; sharedAudio.removeAttribute('src'); });
+  // A word may start playing before this promise settles (autoplay on the first question); only undo the silent clip.
+  const stillSilent = () => sharedAudio.src.startsWith('data:audio/wav');
+  sharedAudio.play().then(() => { if (stillSilent()) { sharedAudio.pause(); sharedAudio.currentTime = 0; sharedAudio.removeAttribute('src'); } sharedAudio.muted = false; }).catch(() => { if (stillSilent()) sharedAudio.removeAttribute('src'); sharedAudio.muted = false; });
 }
+
+// iOS keeps the page in its "record" audio route after the mic is used, which plays through the quiet earpiece
+// path. The Audio Session API (iOS 16.4+) lets us switch back to normal playback; older iOS simply ignores this.
+function setAudioSession(type) {
+  try { if (navigator.audioSession && navigator.audioSession.type !== type) navigator.audioSession.type = type; } catch { /* unsupported */ }
+}
+setAudioSession('playback');
 document.addEventListener('pointerdown', initAudioUnlock);
 
 function makeSpeech(text, rate = 1) {
   if (!('speechSynthesis' in window) || !window.SpeechSynthesisUtterance) return false;
+  setAudioSession('playback');
   if (sharedAudio) sharedAudio.pause();
   const wasBusy = speechSynthesis.speaking || speechSynthesis.pending;
   if (wasBusy) speechSynthesis.cancel();
@@ -83,6 +93,7 @@ function makeSpeech(text, rate = 1) {
 }
 function playWord(word, forceSpeech = false) {
   if (!forceSpeech && word.audio?.file && sharedAudio) {
+    setAudioSession('playback');
     audioTarget = word;
     if ('speechSynthesis' in window && (speechSynthesis.speaking || speechSynthesis.pending)) speechSynthesis.cancel();
     sharedAudio.src = word.audio.file;
@@ -343,9 +354,10 @@ app.addEventListener('click', (event) => {
     const rerender = () => { if (currentQuestion === 'speak') renderSpeak(); else if (currentQuestion === 'card') renderCard(); else renderCurrentQuestion(); };
     micFeedback = { text: '聆聽中…請說出單字，說完再按一次麥克風或稍等。', attempt };
     rerender();
+    setAudioSession('play-and-record');
     const result = startListening({
       onDebug: (name, detail) => { if (!debugMode) return; micLog.push(`${new Date().toISOString().slice(14, 23)} #${attempt} ${name} ${detail}`); },
-      onState: (active) => { if (!isCurrent()) return; for (const mic of app.querySelectorAll('[data-action="mic"]')) { mic.classList.toggle('listening', active); mic.setAttribute('aria-label', active ? '停止聆聽' : '開始辨識'); } if (!active && debugMode) rerender(); },
+      onState: (active) => { if (!active) setAudioSession('playback'); if (!isCurrent()) return; for (const mic of app.querySelectorAll('[data-action="mic"]')) { mic.classList.toggle('listening', active); mic.setAttribute('aria-label', active ? '停止聆聽' : '開始辨識'); } if (!active && debugMode) rerender(); },
       onResult: (alternatives) => {
         if (!isCurrent()) return;
         attemptResolved = true;

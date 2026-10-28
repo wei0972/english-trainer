@@ -110,3 +110,5 @@ main { flex: 1; }
 .empty-state { border: 2px solid var(--primary); background: var(--primary-soft); }
 .mic-feedback:empty { display: none; }
 @media (max-width: 390px) { .panel { padding: 15px; } .word-card { padding: 20px 14px; } .page-title { font-size: 26px; } }
+
+.mic-log { margin: 8px 0 0; padding: 8px; font-size: 12px; line-height: 1.4; white-space: pre-wrap; word-break: break-all; background: var(--surface-soft); border-radius: 8px; color: var(--muted, inherit); }

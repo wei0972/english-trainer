@@ -1,5 +1,5 @@
 import { buildSession, finalConsonant, freshState, grade, localDateKey, maskSentence, uniqueChoices, validateProgress } from './srs.js';
-import { matchResult, normalize, recognitionSupported, startListening, stopListening, stressKK, tipsForKK } from './pronounce.js';
+import { finishListening, isListening, matchResult, normalize, recognitionSupported, startListening, stopListening, stressKK, tipsForKK } from './pronounce.js';
 
 const app = document.querySelector('#app');
 const STORAGE_KEY = 'et_progress_v1';
@@ -36,6 +36,10 @@ let voices = [];
 let notice = '';
 let micFeedback = null;
 let recognitionToken = 0;
+let micAttempts = 0;
+let attemptResolved = true;
+const debugMode = /[?&]debug=1\b/.test(location.search);
+const micLog = [];
 let forceExtraNew = false;
 let forceRetryToday = false;
 
@@ -103,12 +107,19 @@ function sentenceFor(word, requireForm = false) {
 }
 function svgButton(kind, label, attrs = '') { return `<button class="icon-button" type="button" aria-label="${escapeHTML(label)}" title="${escapeHTML(label)}" ${attrs}>${icons[kind]}</button>`; }
 
+function renderMicLog() {
+  if (!debugMode || !micLog.length) return '';
+  return `<pre class="mic-log">${escapeHTML(micLog.slice(-12).join('\n'))}</pre>`;
+}
+
 function renderMicFeedback() {
-  if (!micFeedback) return '';
-  if (micFeedback.text) return `<div class="feedback ${micFeedback.bad ? 'bad' : ''}">${escapeHTML(micFeedback.text)}</div>`;
+  if (!micFeedback) return renderMicLog();
+  // Attempt number makes a repeated identical result visibly a new judgment.
+  const attempt = micFeedback.attempt ? `第 ${micFeedback.attempt} 次：` : '';
+  if (micFeedback.text) return `<div class="feedback ${micFeedback.bad ? 'bad' : ''}">${escapeHTML(attempt + micFeedback.text)}</div>${renderMicLog()}`;
   const { result, kk, confidence = '', cue = '' } = micFeedback;
   const message = result.level === 'clear' ? `很清楚！系統一次就聽懂了 ${confidence}` : result.level === 'close' ? `接近，但系統不太確定。聽到：${escapeHTML(result.heard)}` : `系統聽成：${escapeHTML(result.heard || '沒有辨識到')}${cue ? `<br>${escapeHTML(cue)}` : ''}`;
-  return `<div class="kk">[${stressKK(kk)}]</div><div class="feedback ${result.level === 'miss' ? 'bad' : 'good'}">${message}</div>`;
+  return `<div class="kk">[${stressKK(kk)}]</div><div class="feedback ${result.level === 'miss' ? 'bad' : 'good'}">${escapeHTML(attempt)}${message}</div>${renderMicLog()}`;
 }
 
 function renderHome() {
@@ -188,7 +199,7 @@ function renderSpell() {
   if (!questionDone && prefs.autoplay) playWord(current.word);
 }
 function renderQuestion() {
-  stopListening(); recognitionToken++; micFeedback = null; notice = ''; answerShown = false; sentenceTranslationShown = false; questionDone = false; speechAttempts = 0; current.sentence = null;
+  stopListening(); recognitionToken++; micFeedback = null; notice = ''; answerShown = false; sentenceTranslationShown = false; questionDone = false; speechAttempts = 0; micAttempts = 0; attemptResolved = true; current.sentence = null;
   currentQuestion = pickQuestion(current);
   if (current.kind === 'new') newSeen.add(current.word.word);
   if (currentQuestion === 'card') renderCard();
@@ -315,21 +326,34 @@ app.addEventListener('click', (event) => {
     if (!makeSpeech(sentence.en, prefs.speed)) { notice = '此瀏覽器不支援語音播放。'; renderCard(); }
   } else if (action === 'mic') {
     if (!recognitionSupported(window)) { notice = '請用 Safari 開啟，並在 設定 > Siri 開啟聽寫。'; micFeedback = { text: notice, bad: true }; if (currentQuestion === 'speak') renderSpeak(); else renderCard(); return; }
-    if (button.classList.contains('listening')) { recognitionToken++; stopListening(); button.classList.remove('listening'); return; }
+    if (isListening()) {
+      // Still capturing this attempt: the tap means "I'm done talking", so judge what was heard.
+      if (!attemptResolved) { finishListening(); return; }
+      // Previous attempt was already judged but iOS has not closed it yet: drop it and start fresh.
+      recognitionToken++; stopListening();
+    }
     speechAttempts++;
+    micAttempts++;
+    attemptResolved = false;
+    const attempt = micAttempts;
     const token = ++recognitionToken;
     const expectedWord = current.word.word;
     const expectedQuestion = currentQuestion;
     const isCurrent = () => token === recognitionToken && current?.word.word === expectedWord && currentQuestion === expectedQuestion;
+    const rerender = () => { if (currentQuestion === 'speak') renderSpeak(); else if (currentQuestion === 'card') renderCard(); else renderCurrentQuestion(); };
+    micFeedback = { text: '聆聽中…請說出單字，說完再按一次麥克風或稍等。', attempt };
+    rerender();
     const result = startListening({
-      onState: (active) => { if (!isCurrent()) return; for (const mic of app.querySelectorAll('[data-action="mic"]')) { mic.classList.toggle('listening', active); mic.setAttribute('aria-label', active ? '停止聆聽' : '開始辨識'); } },
+      onDebug: (name, detail) => { if (!debugMode) return; micLog.push(`${new Date().toISOString().slice(14, 23)} #${attempt} ${name} ${detail}`); },
+      onState: (active) => { if (!isCurrent()) return; for (const mic of app.querySelectorAll('[data-action="mic"]')) { mic.classList.toggle('listening', active); mic.setAttribute('aria-label', active ? '停止聆聽' : '開始辨識'); } if (!active && debugMode) rerender(); },
       onResult: (alternatives) => {
         if (!isCurrent()) return;
+        attemptResolved = true;
         const resultMatch = matchResult(expectedWord, alternatives);
         const first = alternatives[0];
         const cue = resultMatch.level === 'miss' ? tipsForKK(current.word.kk).join(' ') : '';
         const confidence = resultMatch.level === 'clear' && first?.confidence > 0 ? `（信心度 ${Math.round(first.confidence * 100)}%）` : '';
-        micFeedback = { result: resultMatch, kk: current.word.kk, cue, confidence };
+        micFeedback = { result: resultMatch, kk: current.word.kk, cue, confidence, attempt };
         if (questionDone) renderCurrentQuestion();
         else if (currentQuestion === 'speak') {
           if (resultMatch.level !== 'miss') answer('good');
@@ -339,14 +363,15 @@ app.addEventListener('click', (event) => {
       },
       onError: (error) => {
         if (!isCurrent()) return;
+        attemptResolved = true;
         const messages = { 'not-allowed': '麥克風權限未開啟，請在 Safari 網站設定允許麥克風。', 'service-not-allowed': '語音辨識服務未開啟，請用 Safari 開啟，並在 設定 > Siri 開啟聽寫。', 'no-speech': '沒有聽到聲音，請靠近麥克風再試一次。' };
-        micFeedback = { text: messages[error] || '語音辨識暫時無法使用，請再試一次。', bad: true };
+        micFeedback = { text: messages[error] || '語音辨識暫時無法使用，請再試一次。', bad: true, attempt };
         notice = micFeedback.text;
         if (currentQuestion === 'speak') renderSpeak(); else if (currentQuestion === 'card') renderCard();
       },
-      onNoResult: () => { if (!isCurrent()) return; micFeedback = { text: '沒有聽到聲音，請再試一次。', bad: true }; notice = micFeedback.text; if (currentQuestion === 'speak') renderSpeak(); else if (currentQuestion === 'card') renderCard(); },
+      onNoResult: () => { if (!isCurrent()) return; attemptResolved = true; micFeedback = { text: '沒有聽到聲音，請再試一次。', bad: true, attempt }; notice = micFeedback.text; if (currentQuestion === 'speak') renderSpeak(); else if (currentQuestion === 'card') renderCard(); },
     });
-    if (!result.ok) { notice = result.reason === 'unsupported' ? '請用 Safari 開啟，並在 設定 > Siri 開啟聽寫。' : '無法啟動語音辨識，請稍後再試。'; micFeedback = { text: notice, bad: true }; if (currentQuestion === 'speak') renderSpeak(); else renderCard(); }
+    if (!result.ok) { attemptResolved = true; notice = result.reason === 'unsupported' ? '請用 Safari 開啟，並在 設定 > Siri 開啟聽寫。' : '無法啟動語音辨識，請稍後再試。'; micFeedback = { text: notice, bad: true }; if (currentQuestion === 'speak') renderSpeak(); else renderCard(); }
   } else if (action === 'dont-know') { current.input = ''; answer('again'); }
   else if (action === 'next') nextQuestion();
   else if (action === 'reset') {

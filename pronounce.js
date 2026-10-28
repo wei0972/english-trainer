@@ -91,6 +91,18 @@ export function recognitionSupported(env = globalThis) {
   return Boolean(env.SpeechRecognition || env.webkitSpeechRecognition);
 }
 
+// The button's CSS class can lag behind iOS (onend often arrives late); this is the source of truth.
+export function isListening() {
+  return activeRecognition !== null;
+}
+
+// User pressed stop: end capture but still evaluate what was heard (stopListening discards it).
+export function finishListening() {
+  if (activeRecognition) {
+    try { activeRecognition.stop(); } catch { /* already stopped */ }
+  }
+}
+
 export function stopListening() {
   if (activeTimer) clearTimeout(activeTimer);
   activeTimer = null;
@@ -110,13 +122,16 @@ export function startListening(handlers = {}, env = globalThis) {
   activeRecognition = recognition;
   let timer = null;
   let receivedFinal = false;
+  let latestAlternatives = [];
+  let hadError = false;
+  const debug = (name, detail = '') => handlers.onDebug?.(name, detail);
   recognition.lang = 'en-US';
   recognition.interimResults = true;
   recognition.maxAlternatives = 5;
   recognition.continuous = false;
-  recognition.onstart = () => { if (activeRecognition === recognition) handlers.onState?.(true); };
+  recognition.onstart = () => { debug('start'); if (activeRecognition === recognition) handlers.onState?.(true); };
   recognition.onresult = (event) => {
-    if (activeRecognition !== recognition) return;
+    if (activeRecognition !== recognition) { debug('result-stale'); return; }
     const alternatives = [];
     for (let i = event.resultIndex || 0; i < event.results.length; i++) {
       for (let j = 0; j < event.results[i].length; j++) {
@@ -124,15 +139,32 @@ export function startListening(handlers = {}, env = globalThis) {
         alternatives.push({ transcript: result.transcript, confidence: result.confidence || 0 });
       }
     }
-    if (event.results[event.results.length - 1]?.isFinal) { receivedFinal = true; handlers.onResult?.(alternatives); }
+    const isFinal = Boolean(event.results[event.results.length - 1]?.isFinal);
+    debug(isFinal ? 'final' : 'interim', alternatives[0]?.transcript || '');
+    if (alternatives.length) latestAlternatives = alternatives;
+    if (isFinal && !receivedFinal) {
+      receivedFinal = true;
+      handlers.onResult?.(alternatives);
+      // Release the mic now so the next tap starts a fresh attempt instead of hitting a session iOS has not closed yet.
+      try { recognition.stop(); } catch { /* already stopping */ }
+    }
   };
-  recognition.onerror = (event) => { if (activeRecognition === recognition) handlers.onError?.(event.error || 'unknown'); };
+  recognition.onerror = (event) => {
+    debug('error', event.error || 'unknown');
+    if (activeRecognition !== recognition) return;
+    hadError = true;
+    handlers.onError?.(event.error || 'unknown');
+  };
   recognition.onend = () => {
+    debug('end', receivedFinal ? 'had-final' : `interim=${latestAlternatives.length}`);
     if (activeRecognition !== recognition) return;
     if (timer) clearTimeout(timer);
     activeTimer = null;
     activeRecognition = null;
-    if (!receivedFinal) handlers.onNoResult?.();
+    // iOS Safari frequently ends without ever flagging a result as final; judge the last interim result instead.
+    if (!receivedFinal && latestAlternatives.length) { receivedFinal = true; handlers.onResult?.(latestAlternatives); }
+    // An error (e.g. permission denied) already told the user why; "no speech" would hide it.
+    else if (!receivedFinal && !hadError) handlers.onNoResult?.();
     handlers.onState?.(false);
   };
   try {

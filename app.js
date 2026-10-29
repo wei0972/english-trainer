@@ -1,5 +1,5 @@
-import { buildSession, finalConsonant, freshState, grade, localDateKey, maskSentence, uniqueChoices, validateProgress } from './srs.js?v=20261028212416';
-import { finishListening, isListening, matchResult, normalize, recognitionSupported, startListening, stopListening, stressKK, tipsForKK } from './pronounce.js?v=20261028212416';
+import { buildSession, finalConsonant, freshState, grade, localDateKey, maskSentence, uniqueChoices, validateProgress } from './srs.js?v=20261029212744';
+import { finishListening, isListening, matchResult, normalize, recognitionSupported, startListening, stopListening, stressKK, tipsForKK } from './pronounce.js?v=20261029212744';
 
 const app = document.querySelector('#app');
 const STORAGE_KEY = 'et_progress_v1';
@@ -134,7 +134,7 @@ function renderMicFeedback() {
 }
 
 function renderHome() {
-  const cats = [['all', '全部'], ['daily', '日常'], ['travel', '旅遊']];
+  const cats = [['all', '全部'], ['daily', '日常'], ['travel', '旅遊'], ['senior', '高中']];
   const modes = [['mixed', '混合（推薦）'], ['card', '字卡'], ['listen', '聽音選意思'], ['speak', `看中文說英文${recognitionSupported(window) ? '' : '（此瀏覽器不支援）'}`], ['spell', '聽音拼字']];
   if (!recognitionSupported(window) && prefs.mode === 'speak') prefs.mode = 'mixed';
   const eligible = words.filter((word) => (prefs.category === 'all' || word.category.includes(prefs.category)) && !progress[word.word]?.learnedOn).length;
@@ -401,7 +401,7 @@ app.addEventListener('click', (event) => {
 });
 
 try {
-  const response = await fetch('words.json?v=20261028212416');
+  const response = await fetch('words.json?v=20261029212744');
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   words = await response.json();
   sharedAudio = new Audio();

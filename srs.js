@@ -72,11 +72,13 @@ export function buildSession(words, progress = {}, options = {}) {
   const unseen = filtered.filter((word) => !progress[word.word]?.learnedOn && !reviews.some((review) => review.word === word.word));
   const pool = [...unseen];
   const newWords = [];
-  const tierWeight = (tier) => tier === 1 ? 0.7 : tier === 2 ? 0.25 : 0.05;
+  // A word can sit in several categories at different tiers; weight it by the tier of the category being practised.
+  const tierOf = (word) => (category !== 'all' && word.tiers?.[category]) || word.tier;
+  const tierWeight = (word) => { const tier = tierOf(word); return tier === 1 ? 0.7 : tier === 2 ? 0.25 : 0.05; };
   while (pool.length && newWords.length < remaining) {
-    const total = pool.reduce((sum, word) => sum + tierWeight(word.tier), 0);
+    const total = pool.reduce((sum, word) => sum + tierWeight(word), 0);
     let pick = Math.min(.999999999, Math.max(0, rng())) * total;
-    let index = pool.findIndex((word) => (pick -= tierWeight(word.tier)) < 0);
+    let index = pool.findIndex((word) => (pick -= tierWeight(word)) < 0);
     if (index < 0) index = pool.length - 1;
     newWords.push(pool.splice(index, 1)[0]);
   }

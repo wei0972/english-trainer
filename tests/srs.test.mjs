@@ -95,11 +95,11 @@ test('extra new words ignore the daily limit', () => {
   assert.equal(buildSession(words, {}, { newLimit: 2, todayNew: 2, extraNew: true, rng: () => 0 }).newWords.length, 2);
 });
 
-test('all 732 source sentences are masked at the form word boundary', async () => {
+test('every source sentence (6 per word) is masked at the form word boundary', async () => {
   const source = resolve(dirname(fileURLToPath(import.meta.url)), '../words.json');
   const words = JSON.parse(await readFile(source, 'utf8'));
   const sentences = words.flatMap((word) => word.sentences);
-  assert.equal(sentences.length, 732);
+  assert.equal(sentences.length, words.length * 6);
   for (const sentence of sentences) {
     const masked = maskSentence(sentence.en, sentence.form);
     assert.ok(masked, `could not mask ${sentence.form}: ${sentence.en}`);
@@ -124,4 +124,15 @@ test('session order is shuffled, not replayed in due order', async () => {
   assert.notDeepEqual(first.filter((w) => dueOrder.includes(w)), dueOrder);
   const second = order(buildSession(words, progress, { now, newLimit: 2, todayNew: 0, rng }));
   assert.notDeepEqual(first, second);
+});
+
+test('buildSession weights new words by the tier of the selected category', () => {
+  // 'x' is tier 1 in senior but tier 3 in daily; 'y' is the opposite. rng 0.5 picks by weight.
+  const words = [
+    { word: 'x', tier: 1, tiers: { daily: 3, senior: 1 }, category: ['daily', 'senior'] },
+    { word: 'y', tier: 1, tiers: { daily: 1, senior: 3 }, category: ['daily', 'senior'] },
+  ];
+  const pick = (category) => buildSession(words, {}, { category, newLimit: 1, rng: () => 0.5 }).newWords[0].word;
+  assert.equal(pick('senior'), 'x');
+  assert.equal(pick('daily'), 'y');
 });

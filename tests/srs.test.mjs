@@ -95,11 +95,11 @@ test('extra new words ignore the daily limit', () => {
   assert.equal(buildSession(words, {}, { newLimit: 2, todayNew: 2, extraNew: true, rng: () => 0 }).newWords.length, 2);
 });
 
-test('every source sentence (6 per word) is masked at the form word boundary', async () => {
+test('every source sentence (6 per word, 3 for elementary) is masked at the form word boundary', async () => {
   const source = resolve(dirname(fileURLToPath(import.meta.url)), '../words.json');
   const words = JSON.parse(await readFile(source, 'utf8'));
+  for (const word of words) assert.equal(word.sentences.length, word.category.includes('elementary') ? 3 : 6, word.word);
   const sentences = words.flatMap((word) => word.sentences);
-  assert.equal(sentences.length, words.length * 6);
   for (const sentence of sentences) {
     const masked = maskSentence(sentence.en, sentence.form);
     assert.ok(masked, `could not mask ${sentence.form}: ${sentence.en}`);

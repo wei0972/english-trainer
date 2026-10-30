@@ -49,6 +49,7 @@ main { flex: 1; }
 .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 9px; margin-bottom: 14px; }
 .stat-card { padding: 12px 8px; text-align: center; box-shadow: none; }
 .stat-value { display: block; color: var(--primary); font-size: 23px; font-weight: 750; line-height: 1.2; }
+.stat-total { color: var(--muted); font-size: 15px; font-weight: 650; }
 .stat-label { display: block; margin-top: 4px; color: var(--muted); font-size: 12px; line-height: 1.35; }
 .mode-grid { display: grid; gap: 7px; }
 .mode-option { min-height: 46px; display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 11px; background: var(--surface); font-size: 15px; }

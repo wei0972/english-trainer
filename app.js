@@ -1,5 +1,5 @@
-import { buildSession, finalConsonant, freshState, grade, localDateKey, maskSentence, uniqueChoices, validateProgress } from './srs.js?v=20261029212744';
-import { finishListening, isListening, matchResult, normalize, recognitionSupported, startListening, stopListening, stressKK, tipsForKK } from './pronounce.js?v=20261029212744';
+import { buildSession, finalConsonant, freshState, grade, localDateKey, maskSentence, uniqueChoices, validateProgress } from './srs.js?v=20261030125929';
+import { finishListening, isListening, matchResult, normalize, recognitionSupported, startListening, stopListening, stressKK, tipsForKK } from './pronounce.js?v=20261030125929';
 
 const app = document.querySelector('#app');
 const STORAGE_KEY = 'et_progress_v1';
@@ -401,7 +401,7 @@ app.addEventListener('click', (event) => {
 });
 
 try {
-  const response = await fetch('words.json?v=20261029212744');
+  const response = await fetch('words.json?v=20261030125929');
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   words = await response.json();
   sharedAudio = new Audio();

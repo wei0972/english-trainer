@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { resolve, dirname } from 'node:path';
-import { grade, buildSession, validateProgress, maskSentence, uniqueChoices, finalConsonant } from '../srs.js';
+import { grade, buildSession, validateProgress, maskSentence, uniqueChoices, finalConsonant, markFamiliar, failCheck, rangeSizes, rangeStatus, advanceRange, MASTER_INTERVAL } from '../srs.js';
 
 test('again resets interval, delays ten minutes, lowers ease and counts a lapse', () => {
   const state = { reps: 2, interval: 6, ease: 2.5, due: 0, lapses: 1, lastSentence: 0 };
@@ -126,11 +126,11 @@ test('session order is shuffled, not replayed in due order', async () => {
   assert.notDeepEqual(first, second);
 });
 
-test('buildSession weights new words by the tier of the selected category', () => {
-  // 'x' is tier 1 in senior but tier 3 in daily; 'y' is the opposite. rng 0.5 picks by weight.
+test('buildSession weights new words by the rank in the selected category', () => {
+  // 'x' is rank 1 in senior but rank 50 in daily; 'y' is the opposite. rng 0.5 picks by weight (1 / rank).
   const words = [
-    { word: 'x', tier: 1, tiers: { daily: 3, senior: 1 }, category: ['daily', 'senior'] },
-    { word: 'y', tier: 1, tiers: { daily: 1, senior: 3 }, category: ['daily', 'senior'] },
+    { word: 'x', tier: 1, ranks: { daily: 50, senior: 1 }, category: ['daily', 'senior'] },
+    { word: 'y', tier: 1, ranks: { daily: 1, senior: 50 }, category: ['daily', 'senior'] },
   ];
   const pick = (category) => buildSession(words, {}, { category, newLimit: 1, rng: () => 0.5 }).newWords[0].word;
   assert.equal(pick('senior'), 'x');
@@ -166,4 +166,81 @@ test('a missed drill entry comes back as a drill with the same drillMode', () =>
   const normal = buildSession([{ word: 'b', tier: 1, category: ['daily'] }], {}, { newLimit: 1, rng: () => 0 });
   const entry = normal.next(); normal.mark(entry, 'again');
   assert.equal(normal.next().kind, 'retry');
+});
+
+const DAY = 86_400_000;
+const ranked = (n, category = 'daily') => Array.from({ length: n }, (_, i) => ({ word: `w${i + 1}`, tier: 1, category: [category], ranks: { [category]: i + 1, all: i + 1 } }));
+
+test('new words stay inside the open range until it has no unseen words left', () => {
+  const words = ranked(300);
+  for (let seed = 0; seed < 20; seed++) {
+    const picked = buildSession(words, {}, { category: 'daily', rangeSize: 100, newLimit: 20, rng: () => (seed * 0.049) % 1 }).newWords;
+    assert.equal(picked.every((word) => Number(word.word.slice(1)) <= 100), true);
+  }
+  const learned = Object.fromEntries(words.slice(0, 98).map((word) => [word.word, { reps: 1, interval: 3, ease: 2.5, due: Date.now() + 9 * DAY, lapses: 0, learnedOn: '2026-01-01' }]));
+  const spill = buildSession(words, learned, { category: 'daily', rangeSize: 100, newLimit: 4, rng: () => 0 }).newWords.map((word) => word.word);
+  assert.deepEqual(spill.slice(0, 2).sort(), ['w100', 'w99']);
+  assert.equal(spill.length, 4);
+});
+
+test('frequent words are drawn first more often than rare ones', () => {
+  const words = ranked(100);
+  let seed = 3; const rng = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; };
+  let top = 0; let bottom = 0;
+  for (let i = 0; i < 400; i++) {
+    const first = buildSession(words, {}, { category: 'daily', rangeSize: 100, newLimit: 1, rng }).newWords[0];
+    const rank = first.ranks.daily; if (rank <= 10) top++; if (rank > 90) bottom++;
+  }
+  assert.ok(top > bottom * 5, `top ${top} bottom ${bottom}`);
+});
+
+test('familiar on two different days masters a word; twice on one day does not', () => {
+  const day1 = Date.UTC(2026, 10, 2, 4); const day2 = day1 + DAY;
+  let state = markFamiliar(undefined, day1);
+  state = markFamiliar(state, day1 + 1000);
+  assert.equal(state.mastered, undefined);
+  assert.equal(state.familiarOn.length, 1);
+  state = markFamiliar(state, day2);
+  assert.equal(state.mastered, true);
+  assert.ok(state.due >= day2 + MASTER_INTERVAL * DAY);
+  const failed = failCheck(state, day2);
+  assert.equal(failed.mastered, false);
+  assert.deepEqual(failed.familiarOn, []);
+  assert.equal(failed.lapses, 1);
+});
+
+test('range sizes collapse when a category is smaller than the next range', () => {
+  assert.deepEqual(rangeSizes(458), [100, 458]);
+  assert.deepEqual(rangeSizes(1826), [100, 500, 1000, 1826]);
+  assert.deepEqual(rangeSizes(60), [60]);
+});
+
+test('a range opens the next one only after 90% mastered and every mastered word passed a check', () => {
+  const words = ranked(600);
+  const progress = {};
+  for (const word of words.slice(0, 89)) progress[word.word] = { mastered: true, learnedOn: '2026-01-01' };
+  let status = advanceRange(words, progress, 'daily', 0);
+  assert.equal(status.size, 100); assert.equal(status.checking, false); assert.equal(status.pending.length, 0);
+  progress.w90 = { mastered: true, learnedOn: '2026-01-01' };
+  status = advanceRange(words, progress, 'daily', 0);
+  assert.equal(status.size, 100); assert.equal(status.checking, true); assert.equal(status.pending.length, 90);
+  const session = buildSession(words, progress, { category: 'daily', rangeSize: status.size, checks: status.pending, newLimit: 2, rng: () => 0 });
+  assert.equal(session.queue.filter((entry) => entry.kind === 'check').length, 10);
+  for (const word of status.pending) progress[word.word].checkedRange = 100;
+  status = advanceRange(words, progress, 'daily', 0);
+  assert.equal(status.size, 500); assert.equal(status.level, 1); assert.equal(status.checking, false);
+  assert.equal(rangeStatus(words, progress, 'daily', 1).mastered, 90);
+});
+
+test('the last range runs its check round and then stays complete', () => {
+  const words = ranked(50);
+  const progress = Object.fromEntries(words.map((word) => [word.word, { mastered: true, checkedRange: 50, learnedOn: '2026-01-01' }]));
+  const status = advanceRange(words, progress, 'daily', 0);
+  assert.equal(status.last, true); assert.equal(status.complete, true); assert.equal(status.pending.length, 0);
+});
+
+test('progress validation keeps familiar fields and drops malformed ones', () => {
+  const ok = { reps: 1, interval: 1, ease: 2.5, due: 1, lapses: 0, familiarOn: ['2026-11-01'], mastered: true, checkedRange: 100 };
+  assert.deepEqual(validateProgress({ ok }), { ok });
+  assert.deepEqual(validateProgress({ a: { familiarOn: 'x' }, b: { mastered: 'yes' }, c: { checkedRange: '100' } }), {});
 });

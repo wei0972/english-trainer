@@ -1,11 +1,12 @@
-import { buildSession, finalConsonant, freshState, grade, localDateKey, maskSentence, uniqueChoices, validateProgress } from './srs.js?v=20261102204038';
-import { activeEventsOf, activeWords, confusionPairs, markFixed, recordMistake, validateMistakes } from './mistakes.js?v=20261102204038';
-import { finishListening, isListening, matchResult, normalize, recognitionSupported, startListening, stopListening, stressKK, tipsForKK } from './pronounce.js?v=20261102204038';
+import { advanceRange, buildSession, failCheck, finalConsonant, freshState, grade, localDateKey, markFamiliar, maskSentence, RANGE_SHARE, uniqueChoices, validateProgress } from './srs.js?v=20261103001722';
+import { activeEventsOf, activeWords, confusionPairs, markFixed, recordMistake, validateMistakes } from './mistakes.js?v=20261103001722';
+import { finishListening, isListening, matchResult, normalize, recognitionSupported, startListening, stopListening, stressKK, tipsForKK } from './pronounce.js?v=20261103001722';
 
 const app = document.querySelector('#app');
 const STORAGE_KEY = 'et_progress_v1';
 const PREF_KEY = 'et_preferences_v1';
 const MISTAKE_KEY = 'et_mistakes_v1';
+const RANGE_KEY = 'et_ranges_v1';
 const icons = {
   play: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.8c0-.8.9-1.3 1.6-.9l10 6.2a1 1 0 0 1 0 1.7l-10 6.2c-.7.4-1.6-.1-1.6-.9V5.8Z"/></svg>',
   mic: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 14a3.2 3.2 0 0 0 3.2-3.2V5.2a3.2 3.2 0 0 0-6.4 0v5.6A3.2 3.2 0 0 0 12 14Zm5.6-3.2a1 1 0 1 1 2 0 7.6 7.6 0 0 1-6.6 7.5V21h3a1 1 0 1 1 0 2H8a1 1 0 1 1 0-2h3v-2.7a7.6 7.6 0 0 1-6.6-7.5 1 1 0 1 1 2 0 5.6 5.6 0 0 0 11.2 0Z"/></svg>',
@@ -18,6 +19,10 @@ const defaults = { category: 'all', mode: 'mixed', dailyLimit: 8, speed: 0.85, a
 let prefs = { ...defaults, ...safeRead(PREF_KEY, {}) };
 let progress = validateProgress(safeRead(STORAGE_KEY, {}));
 let mistakes = validateMistakes(safeRead(MISTAKE_KEY, {}));
+// Open frequency range per category (index into rangeSizes); it only ever grows.
+const validateRanges = (value) => Object.fromEntries(Object.entries(value || {}).filter(([, level]) => Number.isInteger(level) && level >= 0));
+let ranges = validateRanges(safeRead(RANGE_KEY, {}));
+let sessionRangeSize = Infinity;
 let words = [];
 let session = null;
 let current = null;
@@ -61,6 +66,37 @@ function dueCount() { const now = Date.now(); return words.filter((word) => prog
 function savePrefs() { safeWrite(PREF_KEY, prefs); }
 function saveProgress() { if (!safeWrite(STORAGE_KEY, progress)) notice = '此瀏覽器目前無法儲存進度；離開頁面後資料可能不會保留。'; }
 function saveMistakes() { if (!safeWrite(MISTAKE_KEY, mistakes)) notice = '此瀏覽器目前無法儲存錯誤本；離開頁面後資料可能不會保留。'; }
+function currentRange() {
+  const level = ranges[prefs.category] ?? 0;
+  const status = advanceRange(words, progress, prefs.category, level);
+  if (status.level !== level) { ranges[prefs.category] = status.level; safeWrite(RANGE_KEY, ranges); }
+  return status;
+}
+function sessionOptions(range) { return { category: prefs.category, newLimit: prefs.dailyLimit, now: Date.now(), mode: prefs.mode, rangeSize: range.size, checks: range.pending }; }
+function setFamiliar(word) {
+  const next = markFamiliar(progress[word.word] || freshState(), Date.now());
+  next.learnedOn ||= localDateKey();
+  progress[word.word] = next;
+  saveProgress();
+}
+// Check round: passing records the range it was checked for; failing takes away "熟悉了" and reviews it again.
+function settleCheck(word, passed) {
+  const previous = progress[word.word] || freshState();
+  progress[word.word] = passed ? { ...previous, checkedRange: sessionRangeSize } : { ...failCheck(previous, Date.now()), lapsedOn: localDateKey() };
+  saveProgress();
+}
+function renderRangePanel(range) {
+  const whole = range.last && range.size === categoryWords().length;
+  const scope = whole ? `整個分類 ${range.size} 字` : `最常用的前 ${range.size} 字`;
+  const need = Math.ceil(RANGE_SHARE * range.size);
+  const hint = range.checking ? `已熟悉九成，驗收輪進行中：還有 ${range.pending.length} 字要再確認一次${whole ? '' : '，通過後開放下一個範圍'}。`
+    : range.complete ? '這個分類的字都熟悉也驗收過了，熟悉的字之後每 60 天會再出現一次。'
+    : `同一個字在不同天按兩次「熟悉了」才算熟悉；熟悉 ${need} 字並通過驗收後${whole ? '完成這個分類' : '開放下一個範圍'}。`;
+  return `<div class="panel"><h2 class="section-heading">常用字範圍</h2><p>目前練習：${scope}，已熟悉 ${range.mastered}／${range.size}</p><p class="small muted">${hint}</p></div>`;
+}
+function nextButtons() {
+  return `<div class="toolbar">${current.correct ? '<button class="btn" type="button" data-action="familiar-next">熟悉了</button>' : ''}<button class="btn btn-primary" type="button" data-action="next">下一題</button></div>`;
+}
 function logMistake(mode, heard, level) { mistakes = recordMistake(mistakes, current.word.word, { mode, heard, level, at: Date.now() }); saveMistakes(); }
 function fixMistake(mode) { if (!mistakes[current.word.word]) return; mistakes = markFixed(mistakes, current.word.word, mode, Date.now()); saveMistakes(); }
 function initAudioUnlock() {
@@ -152,13 +188,15 @@ function renderHome() {
   if (!recognitionSupported(window) && prefs.mode === 'speak') prefs.mode = 'mixed';
   const eligible = words.filter((word) => (prefs.category === 'all' || word.category.includes(prefs.category)) && !progress[word.word]?.learnedOn).length;
   // Ask the session builder itself, so the home screen never offers a start button that would do nothing.
-  const noPractice = !buildSession(words, progress, { category: prefs.category, newLimit: prefs.dailyLimit, now: Date.now(), mode: prefs.mode }).total;
+  const range = currentRange();
+  const noPractice = !buildSession(words, progress, sessionOptions(range)).total;
   const todayMisses = words.filter((word) => progress[word.word]?.lapsedOn === localDateKey() && (prefs.category === 'all' || word.category.includes(prefs.category))).length;
   app.innerHTML = `<section><p class="eyebrow">美國生活・考試・職場</p><h1 class="page-title">英文單字練習</h1><p class="intro">用短短幾分鐘，把常用單字記起來。</p>
     ${!recognitionSupported(window) ? '<p class="feedback">此瀏覽器不支援語音辨識。請使用 Safari 並在「設定 &gt; Siri」開啟聽寫。</p>' : ''}
     ${!('speechSynthesis' in window) ? '<p class="feedback">此瀏覽器不支援語音播放，練習中的播放鍵已停用。</p>' : ''}
     <div class="panel"><h2 class="section-heading">選擇單字分類</h2><div class="segmented" role="group" aria-label="單字分類">${cats.map(([value, label]) => `<button type="button" data-category="${value}" aria-pressed="${prefs.category === value}">${label}</button>`).join('')}</div></div>
     <div class="stats"><div class="stat-card"><span class="stat-value">${dueCount()}</span><span class="stat-label">待複習字</span></div><div class="stat-card"><span class="stat-value">${countTodayNew()}／${prefs.dailyLimit}</span><span class="stat-label">今日新字（已學／上限）</span></div><div class="stat-card"><span class="stat-value">${learnedCount()}<span class="stat-total">／${categoryWords().length}</span></span><span class="stat-label">已學單字</span></div></div>
+    ${renderRangePanel(range)}
     <div class="panel"><h2 class="section-heading">選擇練習方式</h2><div class="mode-grid">${modes.map(([value, label]) => `<label class="mode-option"><input type="radio" name="mode" value="${value}" ${prefs.mode === value ? 'checked' : ''} ${value === 'speak' && !recognitionSupported(window) ? 'disabled' : ''}><span>${label}</span></label>`).join('')}</div></div>
     ${noPractice ? `<div class="panel empty-state"><h2>今天的新字和複習都完成了</h2><p>${eligible ? '想多練，可以再加一批新字。' : '這個分類的字都學過了，到期的字會自動出現在複習。'}</p><div class="button-row">${eligible ? `<button class="btn btn-primary" type="button" data-action="extra-new">加練 ${prefs.dailyLimit} 個新字</button>` : ''}${todayMisses ? `<button class="btn btn-soft" type="button" data-action="retry-today">複習今天答錯的字</button>` : ''}</div></div>`
       : '<button class="btn btn-primary" type="button" data-action="start">開始練習</button>'}
@@ -195,7 +233,7 @@ function renderCard() {
   current.sentence = sentence;
   const reveal = current.kind === 'new' || answerShown;
   const card = renderWordCard(word, reveal, { ...sentence, zhVisible: sentenceTranslationShown, canReveal: true });
-  app.innerHTML = `${renderExerciseTop()}${card}${!reveal ? `<button class="btn btn-primary" type="button" data-action="reveal">看答案</button>` : `<div class="toolbar"><button class="btn" type="button" data-grade="again">不熟</button><button class="btn btn-primary" type="button" data-grade="good">認識</button></div>`}${!recognitionSupported(window) ? `<p class="small muted">請用 Safari 開啟，並在 設定 &gt; Siri 開啟聽寫。</p>` : ''}${!('speechSynthesis' in window) ? '<p class="feedback">此瀏覽器不支援語音播放，播放鍵已停用。</p>' : ''}${notice ? `<div class="feedback bad" role="status">${escapeHTML(notice)}</div>` : ''}`;
+  app.innerHTML = `${renderExerciseTop()}${card}${!reveal ? `<button class="btn btn-primary" type="button" data-action="reveal">看答案</button>` : `<div class="toolbar"><button class="btn" type="button" data-grade="again">不熟</button><button class="btn btn-primary" type="button" data-grade="good">認識</button><button class="btn" type="button" data-grade="easy">熟悉了</button></div>`}${!recognitionSupported(window) ? `<p class="small muted">請用 Safari 開啟，並在 設定 &gt; Siri 開啟聽寫。</p>` : ''}${!('speechSynthesis' in window) ? '<p class="feedback">此瀏覽器不支援語音播放，播放鍵已停用。</p>' : ''}${notice ? `<div class="feedback bad" role="status">${escapeHTML(notice)}</div>` : ''}`;
 }
 function otherChoices(target) {
   const category = prefs.category === 'all' ? target.category[0] : prefs.category;
@@ -205,7 +243,7 @@ function otherChoices(target) {
 function renderListen() {
   current.sentence ||= sentenceFor(current.word);
   const choices = current.choices ||= otherChoices(current.word);
-  app.innerHTML = `${renderExerciseTop()}<div class="word-card"><div class="listen-prompt"><button class="icon-button" type="button" data-action="play-word" aria-label="播放單字" ${!('speechSynthesis' in window) ? 'disabled title="此瀏覽器不支援語音播放"' : ''}>${icons.play}</button><span>聽聽看，選出正確意思</span></div><div class="choice-list">${choices.map((word) => `<button class="choice" type="button" data-choice="${escapeHTML(word.word)}" ${questionDone ? 'disabled' : ''}>${escapeHTML(word.gloss_zh)}</button>`).join('')}</div>${!('speechSynthesis' in window) ? '<div class="feedback">此瀏覽器不支援語音播放，播放鍵已停用。</div>' : ''}${notice ? `<div class="feedback bad" role="status">${escapeHTML(notice)}</div>` : ''}</div>${questionDone ? `${renderWordCard(current.word, true, { ...current.sentence, zhVisible: true, canReveal: false })}<div class="feedback ${current.correct ? 'good' : 'bad'}">${current.correct ? '答對了！' : `正確答案是「${escapeHTML(current.word.gloss_zh)}」。`}</div><button class="btn btn-primary" type="button" data-action="next">下一題</button>` : ''}`;
+  app.innerHTML = `${renderExerciseTop()}<div class="word-card"><div class="listen-prompt"><button class="icon-button" type="button" data-action="play-word" aria-label="播放單字" ${!('speechSynthesis' in window) ? 'disabled title="此瀏覽器不支援語音播放"' : ''}>${icons.play}</button><span>聽聽看，選出正確意思</span></div><div class="choice-list">${choices.map((word) => `<button class="choice" type="button" data-choice="${escapeHTML(word.word)}" ${questionDone ? 'disabled' : ''}>${escapeHTML(word.gloss_zh)}</button>`).join('')}</div>${!('speechSynthesis' in window) ? '<div class="feedback">此瀏覽器不支援語音播放，播放鍵已停用。</div>' : ''}${notice ? `<div class="feedback bad" role="status">${escapeHTML(notice)}</div>` : ''}</div>${questionDone ? `${renderWordCard(current.word, true, { ...current.sentence, zhVisible: true, canReveal: false })}<div class="feedback ${current.correct ? 'good' : 'bad'}">${current.correct ? '答對了！' : `正確答案是「${escapeHTML(current.word.gloss_zh)}」。`}</div>${nextButtons()}` : ''}`;
   if (!questionDone && prefs.autoplay) playWord(current.word);
 }
 function renderSpeak() {
@@ -213,7 +251,7 @@ function renderSpeak() {
   current.sentence = sentence;
   const hiddenEn = maskSentence(sentence.en, sentence.form) || sentence.en;
   const mic = recognitionSupported(window) ? svgButton('mic', speechAttempts ? '再試一次' : '開始辨識', `data-action="mic" ${questionDone ? 'disabled' : ''}`) : `<button class="icon-button" type="button" disabled aria-label="語音辨識不支援" title="請用 Safari 開啟並啟用聽寫">${icons.mic}</button>`;
-  app.innerHTML = `${renderExerciseTop()}<div class="word-card"><p class="eyebrow">看中文，說出英文</p><p class="translation">${escapeHTML(current.word.gloss_zh)}</p><p class="word-meta">${escapeHTML(current.word.pos)}</p><div class="sentence"><div class="sentence-en">${escapeHTML(hiddenEn)}</div><div class="sentence-zh">${escapeHTML(sentence.zh)}</div></div><div class="toolbar">${mic}<button class="btn" type="button" data-action="dont-know" ${questionDone ? 'disabled' : ''}>我不會</button></div><div class="mic-feedback">${renderMicFeedback()}</div>${current.selfCheck && !questionDone ? '<div class="toolbar"><button class="btn" type="button" data-action="self-bad">算我錯</button><button class="btn btn-primary" type="button" data-action="self-good">我唸對了</button></div>' : ''}${!('speechSynthesis' in window) ? '<div class="feedback">此瀏覽器不支援語音播放，播放鍵已停用。</div>' : ''}${notice ? `<div class="feedback bad" role="status">${escapeHTML(notice)}</div>` : ''}</div>${questionDone ? `<div class="word-card">${renderWordCard(current.word, true)}<button class="btn btn-primary" type="button" data-action="next">下一題</button></div>` : !recognitionSupported(window) ? `<p class="small muted">請用 Safari 開啟，並在 設定 &gt; Siri 開啟聽寫。</p>` : ''}`;
+  app.innerHTML = `${renderExerciseTop()}<div class="word-card"><p class="eyebrow">看中文，說出英文</p><p class="translation">${escapeHTML(current.word.gloss_zh)}</p><p class="word-meta">${escapeHTML(current.word.pos)}</p><div class="sentence"><div class="sentence-en">${escapeHTML(hiddenEn)}</div><div class="sentence-zh">${escapeHTML(sentence.zh)}</div></div><div class="toolbar">${mic}<button class="btn" type="button" data-action="dont-know" ${questionDone ? 'disabled' : ''}>我不會</button></div><div class="mic-feedback">${renderMicFeedback()}</div>${current.selfCheck && !questionDone ? '<div class="toolbar"><button class="btn" type="button" data-action="self-bad">算我錯</button><button class="btn btn-primary" type="button" data-action="self-good">我唸對了</button></div>' : ''}${!('speechSynthesis' in window) ? '<div class="feedback">此瀏覽器不支援語音播放，播放鍵已停用。</div>' : ''}${notice ? `<div class="feedback bad" role="status">${escapeHTML(notice)}</div>` : ''}</div>${questionDone ? `<div class="word-card">${renderWordCard(current.word, true)}${nextButtons()}</div>` : !recognitionSupported(window) ? `<p class="small muted">請用 Safari 開啟，並在 設定 &gt; Siri 開啟聽寫。</p>` : ''}`;
 }
 function spellingDiff(target, input) {
   const expected = normalize(target); const heard = normalize(input);
@@ -221,7 +259,7 @@ function spellingDiff(target, input) {
   return `差異從第 ${i + 1} 個字元附近開始。`;
 }
 function renderSpell() {
-  app.innerHTML = `${renderExerciseTop()}<div class="word-card"><div class="listen-prompt"><button class="icon-button" type="button" data-action="play-word" aria-label="播放單字" ${!('speechSynthesis' in window) ? 'disabled title="此瀏覽器不支援語音播放"' : ''}>${icons.play}</button><span>聽發音，再輸入單字</span></div><form data-form="spell"><label class="eyebrow" for="spelling">英文拼字</label><input id="spelling" class="text-answer" name="spelling" autocapitalize="off" autocorrect="off" spellcheck="false" autocomplete="off" ${questionDone ? 'disabled' : ''}><button class="btn btn-primary" type="submit" style="margin-top:10px" ${questionDone ? 'disabled' : ''}>送出答案</button></form>${!('speechSynthesis' in window) ? '<div class="feedback">此瀏覽器不支援語音播放，播放鍵已停用。</div>' : ''}${notice ? `<div class="feedback bad" role="status">${escapeHTML(notice)}</div>` : ''}${questionDone ? `<div class="feedback ${current.correct ? 'good' : 'bad'}">${current.correct ? '拼對了！' : `${current.nearHyphen ? '接近，空格或連字號和標準拼法不同。' : ''}正確拼法：<strong>${escapeHTML(current.word.word)}</strong><br>${escapeHTML(spellingDiff(current.word.word, current.input))}`}</div><button class="btn btn-primary" type="button" data-action="next">下一題</button>` : ''}</div>`;
+  app.innerHTML = `${renderExerciseTop()}<div class="word-card"><div class="listen-prompt"><button class="icon-button" type="button" data-action="play-word" aria-label="播放單字" ${!('speechSynthesis' in window) ? 'disabled title="此瀏覽器不支援語音播放"' : ''}>${icons.play}</button><span>聽發音，再輸入單字</span></div><form data-form="spell"><label class="eyebrow" for="spelling">英文拼字</label><input id="spelling" class="text-answer" name="spelling" autocapitalize="off" autocorrect="off" spellcheck="false" autocomplete="off" ${questionDone ? 'disabled' : ''}><button class="btn btn-primary" type="submit" style="margin-top:10px" ${questionDone ? 'disabled' : ''}>送出答案</button></form>${!('speechSynthesis' in window) ? '<div class="feedback">此瀏覽器不支援語音播放，播放鍵已停用。</div>' : ''}${notice ? `<div class="feedback bad" role="status">${escapeHTML(notice)}</div>` : ''}${questionDone ? `<div class="feedback ${current.correct ? 'good' : 'bad'}">${current.correct ? '拼對了！' : `${current.nearHyphen ? '接近，空格或連字號和標準拼法不同。' : ''}正確拼法：<strong>${escapeHTML(current.word.word)}</strong><br>${escapeHTML(spellingDiff(current.word.word, current.input))}`}</div>${nextButtons()}` : ''}</div>`;
   if (!questionDone && prefs.autoplay) playWord(current.word);
 }
 function renderQuestion() {
@@ -250,15 +288,18 @@ function setGrade(word, quality) {
   const previous = progress[word.word] || freshState();
   const next = grade(previous, quality, Date.now());
   next.learnedOn = previous.learnedOn || localDateKey();
-  if (quality === 'again') next.lapsedOn = localDateKey();
+  // Forgetting a mastered word in a normal review takes away its "熟悉了" like a failed check does.
+  if (quality === 'again') { next.lapsedOn = localDateKey(); if (next.mastered) { next.mastered = false; next.familiarOn = []; } }
   progress[word.word] = next;
   saveProgress();
 }
 function answer(quality) {
   if (questionDone) return;
   questionDone = true;
-  const correct = quality === 'good';
-  if (!((current.kind === 'quiz' || current.kind === 'drill') && correct)) setGrade(current.word, correct ? 'good' : 'again');
+  const correct = quality !== 'again';
+  if (current.kind === 'check') { settleCheck(current.word, correct); if (quality === 'easy') setFamiliar(current.word); }
+  else if (quality === 'easy') { setGrade(current.word, 'easy'); setFamiliar(current.word); }
+  else if (!((current.kind === 'quiz' || current.kind === 'drill') && correct)) setGrade(current.word, correct ? 'good' : 'again');
   if (correct && currentQuestion !== 'card') fixMistake(currentQuestion);
   if (correct) rightCount++; else missed.add(current.word.word);
   answeredCount++;
@@ -272,7 +313,9 @@ function answer(quality) {
 }
 function beginSession() {
   currentMode = prefs.mode;
-  session = buildSession(words, progress, { category: prefs.category, newLimit: prefs.dailyLimit, now: Date.now(), extraNew: forceExtraNew, retryToday: forceRetryToday, mode: currentMode });
+  const range = currentRange();
+  sessionRangeSize = range.size;
+  session = buildSession(words, progress, { ...sessionOptions(range), extraNew: forceExtraNew, retryToday: forceRetryToday });
   forceExtraNew = false; forceRetryToday = false;
   if (!session.total) { renderHome(); app.querySelector('.empty-state')?.scrollIntoView({ block: 'center' }); return; }
   rightCount = 0; answeredCount = 0; missed = new Set(); newSeen = new Set(); sentencesUsed = new Map();
@@ -320,7 +363,7 @@ function renderMistakes() {
     <p class="small muted">已改正 ${fixedCount} 字</p>${notice ? `<p class="feedback">${escapeHTML(notice)}</p>` : ''}</section>`;
 }
 function renderSettings() {
-  const exported = JSON.stringify({ progress, preferences: prefs, mistakes }, null, 2);
+  const exported = JSON.stringify({ progress, preferences: prefs, mistakes, ranges }, null, 2);
   app.innerHTML = `<section><button class="btn btn-link" type="button" data-action="home">‹ 回首頁</button><h1 class="page-title">設定</h1><p class="intro">依照自己的步調調整練習。</p><div class="panel"><div class="setting-row"><label for="daily-limit">每日新字數（4–20）</label><select id="daily-limit">${Array.from({ length: 17 }, (_, i) => i + 4).map((n) => `<option value="${n}" ${n === prefs.dailyLimit ? 'selected' : ''}>${n} 字</option>`).join('')}</select></div><div class="setting-row"><label for="speed">例句語速</label><select id="speed">${[['0.7', '慢速'], ['0.85', '稍慢'], ['1', '一般']].map(([v, label]) => `<option value="${v}" ${Number(v) === prefs.speed ? 'selected' : ''}>${label}（${v}）</option>`).join('')}</select></div><div class="setting-row"><label><input type="checkbox" id="autoplay" ${prefs.autoplay ? 'checked' : ''}> 自動播放單字</label></div><div class="actions"><button class="btn" type="button" data-action="reset">重設所有學習進度</button></div></div><div class="panel"><h2 class="section-heading">匯出／匯入進度</h2><p class="small muted">匯出後複製 JSON 備份；匯入時貼上備份內容，再按匯入。</p><div class="setting-row"><textarea id="progress-json" aria-label="進度 JSON">${escapeHTML(exported)}</textarea></div><div class="button-row"><button class="btn btn-soft" type="button" data-action="export">匯出進度</button><button class="btn btn-soft" type="button" data-action="import">匯入進度</button></div></div></section>`;
 }
 const SOURCES = [
@@ -365,7 +408,8 @@ app.addEventListener('click', (event) => {
     questionDone = true;
     const correct = button.dataset.choice === current.word.word;
     current.correct = correct;
-    if (correct) { rightCount++; if (current.kind !== 'quiz' && current.kind !== 'drill') setGrade(current.word, 'good'); fixMistake('listen'); } else { missed.add(current.word.word); setGrade(current.word, 'again'); logMistake('listen', current.choices?.find((item) => item.word === button.dataset.choice)?.gloss_zh ?? '', 'wrong'); }
+    if (current.kind === 'check') settleCheck(current.word, correct);
+    if (correct) { rightCount++; if (!['quiz', 'drill', 'check'].includes(current.kind)) setGrade(current.word, 'good'); fixMistake('listen'); } else { missed.add(current.word.word); if (current.kind !== 'check') setGrade(current.word, 'again'); logMistake('listen', current.choices?.find((item) => item.word === button.dataset.choice)?.gloss_zh ?? '', 'wrong'); }
     answeredCount++; session.mark(current, correct ? 'good' : 'again');
     if (current.kind === 'new' && currentMode === 'mixed' && correct) session.pushQuiz(current.word, 'quiz');
     renderListen(); return;
@@ -448,22 +492,25 @@ app.addEventListener('click', (event) => {
   } else if (action === 'dont-know') { current.input = ''; if (!questionDone) logMistake('speak', '', 'skip'); answer('again'); }
   else if (action === 'self-good' || action === 'self-bad') { stopListening(); recognitionToken++; answer(action === 'self-good' ? 'good' : 'again'); }
   else if (action === 'next') nextQuestion();
+  else if (action === 'familiar-next') { setFamiliar(current.word); nextQuestion(); }
   else if (action === 'reset') {
-    if (window.confirm('確定要重設所有學習進度與錯誤本嗎？此操作無法復原。') && window.confirm('再確認一次：要清除全部已學進度嗎？')) { progress = {}; mistakes = {}; saveProgress(); saveMistakes(); renderSettings(); }
+    if (window.confirm('確定要重設所有學習進度與錯誤本嗎？此操作無法復原。') && window.confirm('再確認一次：要清除全部已學進度嗎？')) { progress = {}; mistakes = {}; ranges = {}; saveProgress(); saveMistakes(); safeWrite(RANGE_KEY, ranges); renderSettings(); }
   } else if (action === 'export') {
-    const area = app.querySelector('#progress-json'); area.value = JSON.stringify({ progress, preferences: prefs, mistakes }, null, 2); area.focus(); area.select();
+    const area = app.querySelector('#progress-json'); area.value = JSON.stringify({ progress, preferences: prefs, mistakes, ranges }, null, 2); area.focus(); area.select();
   } else if (action === 'import') {
     try {
       const parsed = JSON.parse(app.querySelector('#progress-json').value);
       if (!parsed || typeof parsed !== 'object' || !parsed.progress || typeof parsed.progress !== 'object' || Array.isArray(parsed.progress)) throw new Error('format');
       progress = validateProgress(parsed.progress); const importedPrefs = parsed.preferences && typeof parsed.preferences === 'object' && !Array.isArray(parsed.preferences) ? parsed.preferences : {}; prefs = { ...defaults, ...prefs, ...importedPrefs }; if (parsed.mistakes && typeof parsed.mistakes === 'object' && !Array.isArray(parsed.mistakes)) { mistakes = validateMistakes(parsed.mistakes); saveMistakes(); }
+      // Old backups carry no ranges: start from the first range and let advanceRange reopen what the progress earns.
+      ranges = parsed.ranges && typeof parsed.ranges === 'object' && !Array.isArray(parsed.ranges) ? validateRanges(parsed.ranges) : {}; safeWrite(RANGE_KEY, ranges);
       saveProgress(); savePrefs(); renderSettings();
     } catch { const area = app.querySelector('#progress-json'); area.setCustomValidity('JSON 格式不正確，或缺少 progress 欄位。'); area.reportValidity(); }
   }
 });
 
 try {
-  const response = await fetch('words.json?v=20261102204038');
+  const response = await fetch('words.json?v=20261103001722');
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   words = await response.json();
   sharedAudio = new Audio();

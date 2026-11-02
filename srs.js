@@ -12,6 +12,9 @@ export function validateProgress(value) {
     if (!state || typeof state !== 'object' || Array.isArray(state)) continue;
     if (numeric.some((key) => key in state && (typeof state[key] !== 'number' || !Number.isFinite(state[key])))) continue;
     if (['learnedOn', 'lapsedOn'].some((key) => key in state && typeof state[key] !== 'string')) continue;
+    if ('checkedRange' in state && (typeof state.checkedRange !== 'number' || Number.isNaN(state.checkedRange))) continue;
+    if ('mastered' in state && typeof state.mastered !== 'boolean') continue;
+    if ('familiarOn' in state && !(Array.isArray(state.familiarOn) && state.familiarOn.every((day) => typeof day === 'string'))) continue;
     cleaned[word] = { ...state };
   }
   return cleaned;
@@ -37,6 +40,61 @@ export function grade(state = freshState(), quality, now = Date.now()) {
 export function localDateKey(now = Date.now()) {
   const date = new Date(now);
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+
+// Frequency ranges: new words come from the most frequent 100 of a category first, then 500, 1000, then all.
+// "熟悉了" on two different days masters a word (it then returns only every 60 days). A range opens the next one
+// once 90% of it is mastered and every mastered word in it has passed one check round.
+export const RANGES = [100, 500, 1000, Infinity];
+export const MASTER_DAYS = 2;
+export const RANGE_SHARE = 0.9;
+export const MASTER_INTERVAL = 60;
+
+export function rankOf(word, category = 'all') {
+  return word.ranks?.[category] ?? 1e6;
+}
+
+// Range sizes actually distinct for this category (food has 458 words, so 500, 1000 and all are the same range).
+export function rangeSizes(count) {
+  const sizes = [];
+  for (const size of RANGES) { const effective = Math.min(size, count); if (!sizes.includes(effective)) sizes.push(effective); }
+  return sizes;
+}
+
+export function markFamiliar(state = freshState(), now = Date.now()) {
+  const today = localDateKey(now);
+  const days = Array.isArray(state.familiarOn) ? state.familiarOn : [];
+  const next = { ...freshState(), ...state, familiarOn: days.includes(today) ? days : [...days, today].slice(-MASTER_DAYS) };
+  if (next.familiarOn.length >= MASTER_DAYS && !next.mastered) {
+    next.mastered = true;
+    next.interval = Math.max(next.interval, MASTER_INTERVAL);
+    next.due = now + next.interval * DAY;
+  }
+  return next;
+}
+
+export function failCheck(state = freshState(), now = Date.now()) {
+  return { ...grade(state, 'again', now), mastered: false, familiarOn: [] };
+}
+
+export function rangeStatus(words, progress = {}, category = 'all', level = 0) {
+  const members = words.filter((word) => category === 'all' || word.category?.includes(category))
+    .sort((a, b) => rankOf(a, category) - rankOf(b, category));
+  const sizes = rangeSizes(members.length);
+  const index = Math.max(0, Math.min(level, sizes.length - 1));
+  const size = sizes[index] ?? 0;
+  const inRange = members.slice(0, size);
+  const mastered = inRange.filter((word) => progress[word.word]?.mastered);
+  const ready = size > 0 && mastered.length >= RANGE_SHARE * size;
+  const pending = ready ? mastered.filter((word) => (progress[word.word].checkedRange ?? 0) < size) : [];
+  return { level: index, size, last: index === sizes.length - 1, inRange, mastered: mastered.length, checking: ready && pending.length > 0, pending, complete: ready && !pending.length };
+}
+
+// Opens later ranges while the current one is complete; the last range stays open (its check round still runs).
+export function advanceRange(words, progress, category, level = 0) {
+  let status = rangeStatus(words, progress, category, level);
+  while (status.complete && !status.last) status = rangeStatus(words, progress, category, status.level + 1);
+  return status;
 }
 
 export function maskSentence(sentence, form) {
@@ -70,29 +128,38 @@ export function buildSession(words, progress = {}, options = {}) {
     ? options.onlyWords.map((key) => byKey.get(key)).filter(Boolean).slice(0, 30).map((word) => ({ word, kind: 'drill', drillMode: options.drillModes?.[word.word], attempts: 0, defer: 0 }))
     : null;
   const filtered = words.filter((word) => category === 'all' || word.category?.includes(category));
-  const reviews = drillQueue ? [] : filtered.filter((word) => progress[word.word]?.learnedOn && (progress[word.word].due ?? 0) <= now)
+  // Check round: mastered words of a nearly finished range come back once each (10 per session) before it widens.
+  const checkWords = drillQueue ? [] : (options.checks ?? []).slice(0, 10);
+  const checking = new Set(checkWords.map((word) => word.word));
+  const reviews = drillQueue ? [] : filtered.filter((word) => !checking.has(word.word) && progress[word.word]?.learnedOn && (progress[word.word].due ?? 0) <= now)
     .sort((a, b) => (progress[a.word].due ?? 0) - (progress[b.word].due ?? 0)).slice(0, 30);
   const alreadyNew = options.todayNew ?? Object.values(progress).filter((state) => state.learnedOn === today).length;
   const remaining = drillQueue ? 0 : options.extraNew ? Math.min(20, newLimit) : Math.max(0, Math.min(20, newLimit) - alreadyNew);
   const unseen = filtered.filter((word) => !progress[word.word]?.learnedOn && !reviews.some((review) => review.word === word.word));
   const pool = [...unseen];
   const newWords = [];
-  // A word can sit in several categories at different tiers; weight it by the tier of the category being practised.
-  const tierOf = (word) => (category !== 'all' && word.tiers?.[category]) || word.tier;
-  const tierWeight = (word) => { const tier = tierOf(word); return tier === 1 ? 0.7 : tier === 2 ? 0.25 : 0.05; };
+  // More frequent words (by their rank in the practised category) are drawn more often; words beyond the open
+  // range are drawn only once the range has no unseen words left, still nearest-first.
+  const rangeSize = options.rangeSize ?? Infinity;
+  const weightOf = (word) => { const rank = rankOf(word, category); return (rank <= rangeSize ? 1 : 1e-4) / rank; };
   while (pool.length && newWords.length < remaining) {
-    const total = pool.reduce((sum, word) => sum + tierWeight(word), 0);
+    const inRange = pool.some((word) => rankOf(word, category) <= rangeSize);
+    const candidates = inRange ? pool.filter((word) => rankOf(word, category) <= rangeSize) : pool;
+    const total = candidates.reduce((sum, word) => sum + weightOf(word), 0);
     let pick = Math.min(.999999999, Math.max(0, rng())) * total;
-    let index = pool.findIndex((word) => (pick -= tierWeight(word)) < 0);
+    let chosen = candidates.findIndex((word) => (pick -= weightOf(word)) < 0);
+    if (chosen < 0) chosen = candidates.length - 1;
+    let index = pool.indexOf(candidates[chosen]);
     if (index < 0) index = pool.length - 1;
     newWords.push(pool.splice(index, 1)[0]);
   }
   const queue = drillQueue || reviews.map((word) => ({ word, kind: 'review', attempts: 0, defer: 0 }));
   for (const word of newWords) queue.push({ word, kind: 'new', attempts: 0, defer: 0 });
+  for (const word of checkWords) queue.push({ word, kind: 'check', attempts: 0, defer: 0 });
   if (options.retryToday && !drillQueue) {
     for (const word of filtered) {
       const state = progress[word.word];
-      if (state?.lapsedOn === today && state.lapses > 0 && state.due > now && !reviews.includes(word)) {
+      if (state?.lapsedOn === today && state.lapses > 0 && state.due > now && !reviews.includes(word) && !checking.has(word.word)) {
         queue.unshift({ word, kind: 'review', attempts: 0, defer: 0 });
       }
     }

@@ -39,3 +39,15 @@ test('tipsForKK returns at most two pronunciation cues and stressKK marks the st
   assert.ok(tipsForKK('pɪḷ').some((tip) => tip.includes('字尾')));
   assert.ok(tipsForKK('fɑṇ').some((tip) => tip.includes('字尾')));
 });
+
+test('matchResult reports why a result is close: exact, homophone, alternative or none', () => {
+  assert.equal(matchResult('luggage', [{ transcript: 'luggage' }]).reason, 'exact');
+  assert.equal(matchResult('suite', [{ transcript: 'sweet' }]).reason, 'homophone');
+  assert.equal(matchResult('luggage', [{ transcript: 'language' }, { transcript: 'luggage' }]).reason, 'alternative');
+  // A later alternative wins over the homophone label: the recognizer preferred a different word first.
+  assert.equal(matchResult('suite', [{ transcript: 'hello' }, { transcript: 'sweet' }]).reason, 'alternative');
+  // heard reports what the recognizer preferred first, not the later alternative that matched.
+  assert.equal(matchResult('luggage', [{ transcript: 'language' }, { transcript: 'luggage' }]).heard, 'language');
+  assert.equal(matchResult('luggage', [{ transcript: 'language' }]).reason, 'none');
+  assert.equal(matchResult('luggage', []).reason, 'none');
+});

@@ -136,3 +136,34 @@ test('buildSession weights new words by the tier of the selected category', () =
   assert.equal(pick('senior'), 'x');
   assert.equal(pick('daily'), 'y');
 });
+
+test('buildSession onlyWords builds a drill queue: no new words, ignores category, keeps drillMode, caps at 30', () => {
+  const words = Array.from({ length: 40 }, (_, i) => ({ word: `w${i}`, tier: 1, category: i % 2 ? ['travel'] : ['daily'] }));
+  const progress = { w0: { reps: 1, interval: 1, ease: 2.5, due: 0, lapses: 0, learnedOn: '2026-01-01' } };
+  const session = buildSession(words, progress, { category: 'travel', newLimit: 8, now: 100, rng: () => 0, onlyWords: ['w0', 'w2', 'w1', 'missing'], drillModes: { w0: 'spell', w2: 'listen', w1: 'speak' } });
+  assert.equal(session.total, 3);
+  assert.equal(session.newWords.length, 0);
+  assert.equal(session.reviews.length, 0);
+  const entries = [];
+  for (let entry = session.next(); entry; entry = session.next()) entries.push(entry);
+  assert.deepEqual(entries.map((e) => e.word.word).sort(), ['w0', 'w1', 'w2']);
+  assert.ok(entries.every((e) => e.kind === 'drill'));
+  assert.deepEqual(Object.fromEntries(entries.map((e) => [e.word.word, e.drillMode])), { w0: 'spell', w1: 'speak', w2: 'listen' });
+  const capped = buildSession(words, {}, { rng: () => 0, onlyWords: words.map((w) => w.word) });
+  assert.equal(capped.total, 30);
+});
+
+test('a missed drill entry comes back as a drill with the same drillMode', () => {
+  const words = [{ word: 'a', tier: 1, category: ['daily'] }];
+  const session = buildSession(words, {}, { rng: () => 0, onlyWords: ['a'], drillModes: { a: 'spell' } });
+  const first = session.next();
+  assert.equal(session.mark(first, 'again'), true);
+  const retry = session.next();
+  assert.equal(retry.kind, 'drill');
+  assert.equal(retry.drillMode, 'spell');
+  assert.equal(retry.attempts, 1);
+  // Ordinary entries still become plain retries.
+  const normal = buildSession([{ word: 'b', tier: 1, category: ['daily'] }], {}, { newLimit: 1, rng: () => 0 });
+  const entry = normal.next(); normal.mark(entry, 'again');
+  assert.equal(normal.next().kind, 'retry');
+});

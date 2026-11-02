@@ -58,11 +58,13 @@ export function matchResult(target, alternatives = []) {
           const normalizedValues = values.map(normalize);
           return (normalizedTarget === normalizedKey && normalizedValues.includes(form)) || (normalizedValues.includes(normalizedTarget) && form === normalizedKey);
         });
-        return { level: i === 0 && !homophone ? 'clear' : 'close', heard: candidate.transcript || '' };
+        const level = i === 0 && !homophone ? 'clear' : 'close';
+        // 'homophone' (first alternative) is acoustically indistinguishable; 'alternative' means the recognizer preferred another word.
+        return { level, reason: level === 'clear' ? 'exact' : i > 0 ? 'alternative' : 'homophone', heard: i > 0 ? heard : candidate.transcript || '' };
       }
     }
   }
-  return { level: 'miss', heard };
+  return { level: 'miss', reason: 'none', heard };
 }
 
 export function tipsForKK(kk = '') {

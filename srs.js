@@ -64,11 +64,16 @@ export function finalConsonant(kk = '') {
 export function buildSession(words, progress = {}, options = {}) {
   const { category = 'all', newLimit = 8, now = Date.now(), rng = Math.random } = options;
   const today = localDateKey(now);
+  // Mistake-book drill: exactly the requested words (any category, no new words), priority order, capped at 30.
+  const byKey = new Map(words.map((word) => [word.word, word]));
+  const drillQueue = Array.isArray(options.onlyWords)
+    ? options.onlyWords.map((key) => byKey.get(key)).filter(Boolean).slice(0, 30).map((word) => ({ word, kind: 'drill', drillMode: options.drillModes?.[word.word], attempts: 0, defer: 0 }))
+    : null;
   const filtered = words.filter((word) => category === 'all' || word.category?.includes(category));
-  const reviews = filtered.filter((word) => progress[word.word]?.learnedOn && (progress[word.word].due ?? 0) <= now)
+  const reviews = drillQueue ? [] : filtered.filter((word) => progress[word.word]?.learnedOn && (progress[word.word].due ?? 0) <= now)
     .sort((a, b) => (progress[a.word].due ?? 0) - (progress[b.word].due ?? 0)).slice(0, 30);
   const alreadyNew = options.todayNew ?? Object.values(progress).filter((state) => state.learnedOn === today).length;
-  const remaining = options.extraNew ? Math.min(20, newLimit) : Math.max(0, Math.min(20, newLimit) - alreadyNew);
+  const remaining = drillQueue ? 0 : options.extraNew ? Math.min(20, newLimit) : Math.max(0, Math.min(20, newLimit) - alreadyNew);
   const unseen = filtered.filter((word) => !progress[word.word]?.learnedOn && !reviews.some((review) => review.word === word.word));
   const pool = [...unseen];
   const newWords = [];
@@ -82,9 +87,9 @@ export function buildSession(words, progress = {}, options = {}) {
     if (index < 0) index = pool.length - 1;
     newWords.push(pool.splice(index, 1)[0]);
   }
-  const queue = reviews.map((word) => ({ word, kind: 'review', attempts: 0, defer: 0 }));
+  const queue = drillQueue || reviews.map((word) => ({ word, kind: 'review', attempts: 0, defer: 0 }));
   for (const word of newWords) queue.push({ word, kind: 'new', attempts: 0, defer: 0 });
-  if (options.retryToday) {
+  if (options.retryToday && !drillQueue) {
     for (const word of filtered) {
       const state = progress[word.word];
       if (state?.lapsedOn === today && state.lapses > 0 && state.due > now && !reviews.includes(word)) {
@@ -118,7 +123,11 @@ export function buildSession(words, progress = {}, options = {}) {
     mark(entry, quality) {
       if (!entry || entry._marked) return false;
       entry._marked = true;
-      if (quality === 'again' && entry.attempts < 2) retries.push({ word: entry.word, kind: 'retry', attempts: entry.attempts + 1, defer: 4 });
+      if (quality === 'again' && entry.attempts < 2) {
+        const retry = { word: entry.word, kind: entry.kind === 'drill' ? 'drill' : 'retry', attempts: entry.attempts + 1, defer: 4 };
+        if (entry.kind === 'drill') retry.drillMode = entry.drillMode;
+        retries.push(retry);
+      }
       return true;
     },
     pushQuiz(word, kind = 'quiz') {
